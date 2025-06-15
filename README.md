@@ -1,1 +1,1 @@
-# Telegram-Trading-bot
+# TelegramTradingBot.py.
