@@ -15,7 +15,8 @@ import hashlib
 import requests
 import json
 import os
-from datetime import datetime
+f.write(f"{datetime.utcnow()} | {message}\n")
+
 from binance.client import Client
 from binance.enums import *
 
@@ -145,4 +146,4 @@ if __name__ == "__main__":
     send_telegram("🤖 Bot Trading combiné Binance + Bybit lancé.")
     while True:
         trading_cycle()
-        time.sleep(1800)  # 30 minutes
+        time.sleep(300)  # 05 minutes
