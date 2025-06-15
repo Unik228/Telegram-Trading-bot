@@ -1,5 +1,6 @@
 from dotenv import load_dotenv
 import os
+from datetime import datetime
 
 load_dotenv()
 
@@ -9,16 +10,21 @@ BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
+
+message = "Bot démarré"  # exemple de message de log
+
+with open("log.txt", "a") as f:
+    f.write(f"{datetime.utcnow()} | {message}\n")
+
 import time
 import hmac
 import hashlib
 import requests
 import json
-import os
-f.write(f"{datetime.utcnow()} | {message}\n")
 
 from binance.client import Client
 from binance.enums import *
+
 
 # ========== CONFIGURATION ==========
 import os
