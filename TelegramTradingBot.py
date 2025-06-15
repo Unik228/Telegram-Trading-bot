@@ -20,6 +20,8 @@ BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
 
 binance_client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
+binance_client.API_URL = 'https://testnet.binance.vision/api'
+
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 TAKE_PROFIT = 0.02
