@@ -9,18 +9,17 @@ from binance.client import Client
 from binance.enums import *
 
 # ========== CONFIGURATION ==========
-# Telegram
-TELEGRAM_TOKEN = '7384015287:AAEw4cibBQ3Nte0yZFArxT0zyWcFGd6wjAc'
-TELEGRAM_CHAT_ID = '1219735667'  
+import os
+from dotenv import load_dotenv
 
-# Binance
-BINANCE_API = '92FS3rB7LGJnQUBrsT3PoZb4ltzr63jtfNWmZwnXvFB2ikQNr36hdyxK5wbVwlew'
-BINANCE_SECRET = 'QOzWXgWpgtvq88cyDjNHfBRzXQ2rSZlKqXYO3fMY0WSW3sPLsexCIndPtt9IICNq'
-binance_client = Client(BINANCE_API, BINANCE_SECRET)
+load_dotenv()
 
-# Bybit
-BYBIT_API = 'thlAaAJn5vDNxaKUIQ'
-BYBIT_SECRET = 'GMkQ4TZqjIPNKeOhSEiWkTqTWScLS8rR6yLN'
+binance_api_key = os.getenv("BINANCE_API_KEY")
+binance_secret = os.getenv("BINANCE_SECRET_KEY")
+bybit_api_key = os.getenv("BYBIT_API_KEY")
+bybit_secret = os.getenv("BYBIT_SECRET_KEY")
+telegram_token = os.getenv("TELEGRAM_TOKEN")
+
 
 # Trading
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
