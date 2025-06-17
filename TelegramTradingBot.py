@@ -53,52 +53,49 @@ def send_telegram(message):
         pass
 # ========== Partie 2 : Connexion aux exchanges et récupération des prix ==========
 
-# -------- Bybit --------
 def get_bybit_price(symbol):
     try:
-        url = f"https://api.bybit.com/v2/public/tickers?symbol={symbol}"
-        response = requests.get(url)
-        data = response.json()
-        return float(data['result'][0]['last_price'])
-    except Exception as e:
-        log(f"[BYBIT] Erreur sur {symbol} : {str(e)}")
-        send_telegram(f"⚠️ Erreur Bybit {symbol}: {str(e)}")
-        return None
-
-# -------- OKX --------
-def get_okx_price(symbol):
+     def get_price_bybit(symbol):
     try:
-        base, quote = symbol[:-4], symbol[-4:]
-        okx_symbol = f"{base}-{quote}"
-        url = f"https://www.okx.com/api/v5/market/ticker?instId={okx_symbol}"
-        response = requests.get(url)
-        data = response.json()
-        return float(data['data'][0]['last'])
+        url = f"https://api.bybit.com/v5/market/tickers?category=spot"
+        res = requests.get(url)
+        data = res.json()
+        for ticker in data['result']['list']:
+            if ticker['symbol'] == symbol:
+                return float(ticker['lastPrice'])
+        return 0
     except Exception as e:
-        log(f"[OKX] Erreur sur {symbol} : {str(e)}")
-        send_telegram(f"⚠️ Erreur OKX {symbol}: {str(e)}")
-        return None
+        log(f"BYBIT error for {symbol}: {e}")
+        return 0
 
-# -------- Kraken --------
-def get_kraken_price(symbol):
+def get_price_okx(symbol):
     try:
-        # Mapping requis pour Kraken
-        kraken_map = {
-            "BTCUSDT": "XBTUSDT",
-            "ETHUSDT": "ETHUSDT",
-            "SOLUSDT": "SOLUSDT",
-            "XRPUSDT": "XRPUSDT"
-        }
-        kraken_symbol = kraken_map.get(symbol)
-        url = f"https://api.kraken.com/0/public/Ticker?pair={kraken_symbol}"
-        response = requests.get(url)
-        data = response.json()
-        result = list(data['result'].values())[0]
-        return float(result['c'][0])
+        url = f"https://www.okx.com/api/v5/market/ticker?instId={symbol}"
+        res = requests.get(url)
+        if res.status_code != 200:
+            log(f"OKX HTTP ERROR {res.status_code} for {symbol}")
+            return 0
+        data = res.json()
+        return float(data['data'][0]['last']) if 'data' in data and data['data'] else 0
     except Exception as e:
-        log(f"[KRAKEN] Erreur sur {symbol} : {str(e)}")
-        send_telegram(f"⚠️ Erreur Kraken {symbol}: {str(e)}")
-        return None
+        log(f"OKX error for {symbol}: {e}")
+        return 0
+
+def get_price_kraken(symbol):
+    try:
+        # Kraken utilise XBT à la place de BTC
+        if symbol == "BTCUSDT":
+            symbol = "XBTUSDT"
+        pair_code = symbol.replace("USDT", "ZUSD")
+        url = f"https://api.kraken.com/0/public/Ticker?pair={pair_code}"
+        res = requests.get(url)
+        data = res.json()
+        pair = list(data['result'].keys())[0]
+        return float(data['result'][pair]['c'][0])
+    except Exception as e:
+        log(f"KRAKEN error for {symbol}: {e}")
+        return 0
+
 
 # -------- Calcul Spread --------
 def check_spread_and_decide(symbol):
