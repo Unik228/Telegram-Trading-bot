@@ -1,2 +1,6 @@
-python-dotenv
 requests
+python-dotenv
+pandas
+numpy
+ta
+schedule
