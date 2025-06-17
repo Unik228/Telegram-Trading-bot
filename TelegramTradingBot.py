@@ -1,16 +1,23 @@
+# ========== Partie 1 : Imports, configuration et outils utilitaires ==========
+
 import os
-import time
 import json
+import time
 import hmac
 import hashlib
 import requests
-from datetime import datetime, timedelta, timezone
+import schedule
+import pandas as pd
+import numpy as np
+from ta.trend import EMAIndicator, MACD
+from ta.momentum import RSIIndicator
+from datetime import datetime
 from dotenv import load_dotenv
-from threading import Thread
 
+# Chargement des variables d'environnement
 load_dotenv()
 
-# ========== CONFIGURATION ==========
+# ========== Clés API ==========
 BYBIT_API = os.getenv("BYBIT_API")
 BYBIT_SECRET = os.getenv("BYBIT_SECRET")
 OKX_API = os.getenv("OKX_API")
@@ -21,175 +28,236 @@ KRAKEN_SECRET = os.getenv("KRAKEN_SECRET")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-ORDER_SIZE = 10
-TAKE_PROFIT = 0.02
-STOP_LOSS = -0.01
-SPREAD_MIN = 0.5  # %
+# ========== Paramètres ==========
+CAPITAL = 100
+TAKE_PROFIT = 0.03
+STOP_LOSS = -0.015
+SPREAD_THRESHOLD = 0.5  # 0.5% spread minimum pour arbitrage
+ORDER_SIZE = 10  # USD
+
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
 
 POSITIONS_FILE = "positions.json"
-STATS_FILE = "stats.json"
-RUNNING = True
+LOG_FILE = "log.txt"
 
-# ========== OUTILS ==========
 def log(msg):
-    with open("log.txt", "a") as f:
-        f.write(f"{datetime.now(timezone.utc)} | {msg}\n")
+    with open(LOG_FILE, "a") as f:
+        f.write(f"{datetime.now().isoformat()} | {msg}\n")
 
-def send_telegram(msg):
+def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+    try:
+        requests.post(url, data=data)
+    except:
+        pass
+# ========== Partie 2 : Connexion aux exchanges et récupération des prix ==========
 
-def load_positions():
-    if os.path.exists(POSITIONS_FILE):
-        with open(POSITIONS_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-def save_positions(data):
-    with open(POSITIONS_FILE, "w") as f:
-        json.dump(data, f)
-
-def load_stats():
-    if os.path.exists(STATS_FILE):
-        with open(STATS_FILE, "r") as f:
-            return json.load(f)
-    return {"trades": 0, "profit": 0.0}
-
-def save_stats(data):
-    with open(STATS_FILE, "w") as f:
-        json.dump(data, f)
-
-# ========== PRIX ==========
+# -------- Bybit --------
 def get_bybit_price(symbol):
-    r = requests.get(f"https://api.bybit.com/v5/market/tickers?category=spot").json()
-    for coin in r['result']['list']:
-        if coin['symbol'] == symbol:
-            return float(coin['lastPrice'])
-    return None
+    try:
+        url = f"https://api.bybit.com/v2/public/tickers?symbol={symbol}"
+        response = requests.get(url)
+        data = response.json()
+        return float(data['result'][0]['last_price'])
+    except Exception as e:
+        log(f"[BYBIT] Erreur sur {symbol} : {str(e)}")
+        send_telegram(f"⚠️ Erreur Bybit {symbol}: {str(e)}")
+        return None
 
-def get_kraken_price(symbol):
-    symbol_map = {"BTCUSDT": "XBTUSDT", "ETHUSDT": "ETHUSDT"}
-    pair = symbol_map.get(symbol, symbol)
-    r = requests.get(f"https://api.kraken.com/0/public/Ticker?pair={pair}").json()
-    result = r.get("result", {})
-    for data in result.values():
-        return float(data["c"][0])
-    return None
-
+# -------- OKX --------
 def get_okx_price(symbol):
-    r = requests.get(f"https://www.okx.com/api/v5/market/ticker?instId={symbol}").json()
-    return float(r["data"][0]["last"]) if r["data"] else None
+    try:
+        base, quote = symbol[:-4], symbol[-4:]
+        okx_symbol = f"{base}-{quote}"
+        url = f"https://www.okx.com/api/v5/market/ticker?instId={okx_symbol}"
+        response = requests.get(url)
+        data = response.json()
+        return float(data['data'][0]['last'])
+    except Exception as e:
+        log(f"[OKX] Erreur sur {symbol} : {str(e)}")
+        send_telegram(f"⚠️ Erreur OKX {symbol}: {str(e)}")
+        return None
 
-# ========== ORDRES SIMULÉS ==========
-def fake_order(exchange, symbol, side, qty, price):
-    msg = f"{side} {symbol} sur {exchange} à {price}"
-    log(msg)
+# -------- Kraken --------
+def get_kraken_price(symbol):
+    try:
+        # Mapping requis pour Kraken
+        kraken_map = {
+            "BTCUSDT": "XBTUSDT",
+            "ETHUSDT": "ETHUSDT",
+            "SOLUSDT": "SOLUSDT",
+            "XRPUSDT": "XRPUSDT"
+        }
+        kraken_symbol = kraken_map.get(symbol)
+        url = f"https://api.kraken.com/0/public/Ticker?pair={kraken_symbol}"
+        response = requests.get(url)
+        data = response.json()
+        result = list(data['result'].values())[0]
+        return float(result['c'][0])
+    except Exception as e:
+        log(f"[KRAKEN] Erreur sur {symbol} : {str(e)}")
+        send_telegram(f"⚠️ Erreur Kraken {symbol}: {str(e)}")
+        return None
+
+# -------- Calcul Spread --------
+def check_spread_and_decide(symbol):
+    bybit_price = get_bybit_price(symbol)
+    okx_price = get_okx_price(symbol)
+    kraken_price = get_kraken_price(symbol)
+
+    if not all([bybit_price, okx_price, kraken_price]):
+        return
+
+    prices = {"Bybit": bybit_price, "OKX": okx_price, "Kraken": kraken_price}
+    max_exchange = max(prices, key=prices.get)
+    min_exchange = min(prices, key=prices.get)
+
+    spread = (prices[max_exchange] - prices[min_exchange]) / prices[min_exchange] * 100
+
+    if spread >= SPREAD_THRESHOLD:
+        send_telegram(f"📈 Spread détecté {spread:.2f}% sur {symbol} entre {min_exchange} et {max_exchange}")
+        log(f"Spread {spread:.2f}% | Buy: {min_exchange} @ {prices[min_exchange]} | Sell: {max_exchange} @ {prices[max_exchange]}")
+        # Ajoute ici : place_trade(min_exchange, max_exchange, symbol)
+    else:
+        log(f"Spread insuffisant ({spread:.2f}%) pour {symbol}")
+# ========== Partie 3 : Trading simulé et reporting ==========
+
+capital = STARTING_CAPITAL
+trades = []
+is_running = True
+
+def simulate_trade(symbol, buy_price, sell_price, amount=10):
+    global capital
+    profit = (sell_price - buy_price) * amount / buy_price
+    capital += profit
+    trades.append({
+        "symbol": symbol,
+        "buy_price": buy_price,
+        "sell_price": sell_price,
+        "profit": profit,
+        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    })
+    msg = f"✅ TRADE | {symbol}\n💵 Buy: {buy_price:.2f} | Sell: {sell_price:.2f}\n📈 Profit: {profit:.4f} USDT"
     send_telegram(msg)
-    return True
+    log(msg)
 
-# ========== STRATÉGIE ==========
-def trade_cycle():
-    global RUNNING
-    positions = load_positions()
-    stats = load_stats()
+def generate_daily_report():
+    total_profit = sum(t['profit'] for t in trades)
+    total_trades = len(trades)
+    roi = (capital - STARTING_CAPITAL) / STARTING_CAPITAL * 100
 
-    SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+    report = (
+        f"📊 Rapport du jour ({datetime.utcnow().strftime('%Y-%m-%d')}):\n"
+        f"💰 Capital: {capital:.2f} USDT\n"
+        f"📈 Profit net: {total_profit:.4f} USDT\n"
+        f"🔁 Nombre de trades: {total_trades}\n"
+        f"📊 ROI: {roi:.2f}%"
+    )
+    send_telegram(report)
+    log(report)
 
-    for symbol in SYMBOLS:
-        if not RUNNING:
-            break
+# Rapport automatique chaque minuit
+def schedule_daily_report():
+    while True:
+        now = datetime.utcnow()
+        seconds_to_midnight = (datetime.combine(now.date(), datetime.min.time()) + timedelta(days=1) - now).seconds
+        time.sleep(seconds_to_midnight)
+        generate_daily_report()
 
-        try:
-            price_bybit = get_bybit_price(symbol)
-            price_kraken = get_kraken_price(symbol)
-            price_okx = get_okx_price(symbol)
+# ========== Partie 4 : Commandes Telegram ==========
 
-            prices = {
-                "bybit": price_bybit,
-                "kraken": price_kraken,
-                "okx": price_okx,
-            }
+@bot.message_handler(commands=['balance'])
+def balance(msg):
+    roi = (capital - STARTING_CAPITAL) / STARTING_CAPITAL * 100
+    bot.reply_to(msg, f"💼 Capital actuel: {capital:.2f} USDT\n📊 ROI: {roi:.2f}%")
 
-            # Stratégie d'achat sur la plateforme la moins chère
-            best_buy = min(prices.items(), key=lambda x: x[1] if x[1] else float('inf'))
-            best_sell = max(prices.items(), key=lambda x: x[1] if x[1] else float('-inf'))
+@bot.message_handler(commands=['status'])
+def status(msg):
+    state = "🟢 En marche" if is_running else "🔴 En pause"
+    bot.reply_to(msg, f"🤖 Statut du bot : {state}")
 
-            spread = ((best_sell[1] - best_buy[1]) / best_buy[1]) * 100
-            if spread < SPREAD_MIN:
-                continue  # Pas de spread suffisant
+@bot.message_handler(commands=['stop'])
+def stop(msg):
+    global is_running
+    is_running = False
+    bot.reply_to(msg, "⛔ Bot mis en pause.")
 
-            key = f"{symbol}"
-            if key not in positions:
-                qty = round(ORDER_SIZE / best_buy[1], 5)
-                fake_order(best_buy[0], symbol, "BUY", qty, best_buy[1])
-                positions[key] = {
-                    "buy_price": best_buy[1],
-                    "qty": qty,
-                    "buy_exchange": best_buy[0],
-                    "sell_exchange": best_sell[0],
-                }
-            else:
-                change = (best_sell[1] - positions[key]['buy_price']) / positions[key]['buy_price']
-                if change >= TAKE_PROFIT or change <= STOP_LOSS:
-                    fake_order(positions[key]['sell_exchange'], symbol, "SELL", positions[key]["qty"], best_sell[1])
-                    profit = (best_sell[1] - positions[key]['buy_price']) * positions[key]['qty']
-                    stats["trades"] += 1
-                    stats["profit"] += profit
-                    del positions[key]
+@bot.message_handler(commands=['start'])
+def start(msg):
+    global is_running
+    is_running = True
+    bot.reply_to(msg, "✅ Bot relancé.")
 
-        except Exception as e:
-            log(f"{symbol} erreur: {str(e)}")
-            send_telegram(f"⚠️ Erreur sur {symbol}: {str(e)}")
+# Thread du bot Telegram
+telegram_thread = threading.Thread(target=lambda: bot.infinity_polling(), daemon=True)
+telegram_thread.start()
 
-    save_positions(positions)
-    save_stats(stats)
+# Thread du rapport quotidien
+report_thread = threading.Thread(target=schedule_daily_report, daemon=True)
+report_thread.start()
+# ========== Partie 4 : Boucle principale de trading ==========
 
-# ========== TÂCHES ==========
+MIN_SPREAD_PERCENT = 0.4  # seuil minimum de spread pour déclencher un trade
+TRADE_INTERVAL = 300      # secondes entre chaque cycle de scan (5 minutes)
+
+def get_all_symbols_bybit():
+    try:
+        url = "https://api.bybit.com/v5/market/instruments-info?category=spot"
+        response = requests.get(url).json()
+        return [s['symbol'] for s in response['result']['list']]
+    except:
+        return []
+
+def get_all_symbols_okx():
+    try:
+        url = "https://www.okx.com/api/v5/public/instruments?instType=SPOT"
+        response = requests.get(url).json()
+        return [s['instId'] for s in response['data']]
+    except:
+        return []
+
+def get_all_symbols_kraken():
+    try:
+        url = "https://api.kraken.com/0/public/AssetPairs"
+        response = requests.get(url).json()
+        return [k for k in response['result'].keys() if k.endswith("USDT")]
+    except:
+        return []
 
 def loop_trading():
-    while True:
-        if RUNNING:
-            trade_cycle()
-        time.sleep(300)  # 5 min
+    global is_running
 
-def daily_report():
     while True:
-        now = datetime.now()
-        next_run = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        time.sleep((next_run - now).seconds)
-        stats = load_stats()
-        msg = f"📊 Rapport quotidien :\nTrades: {stats['trades']}\nProfit net: {stats['profit']:.2f} USD"
-        send_telegram(msg)
-        save_stats({"trades": 0, "profit": 0.0})
+        if not is_running:
+            time.sleep(5)
+            continue
 
-# ========== COMMANDES TELEGRAM ==========
-def telegram_commands():
-    global RUNNING
-    offset = None
-    while True:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-        if offset:
-            url += f"?offset={offset}"
-        res = requests.get(url).json()
-        for update in res.get("result", []):
-            offset = update["update_id"] + 1
-            cmd = update["message"]["text"]
-            if cmd == "/start":
-                RUNNING = True
-                send_telegram("▶️ Trading relancé.")
-            elif cmd == "/stop":
-                RUNNING = False
-                send_telegram("⏸️ Trading en pause.")
-            elif cmd == "/status":
-                send_telegram("✅ Le bot fonctionne." if RUNNING else "⛔ Le bot est en pause.")
-            elif cmd == "/balance":
-                stats = load_stats()
-                send_telegram(f"💼 Profit: {stats['profit']:.2f} USD | Trades: {stats['trades']}")
-        time.sleep(5)
+        all_symbols = set(get_all_symbols_bybit()) | set(get_all_symbols_okx()) | set(get_all_symbols_kraken())
 
-# ========== MAIN ==========
-if __name__ == "__main__":
-    send_telegram("🤖 Bot multi-exchange lancé.")
-    Thread(target=loop_trading).start()
-    Thread(target=daily_report).start()
-    Thread(target=telegram_commands).start()
+        for symbol in all_symbols:
+            try:
+                price_bybit = get_price_bybit(symbol)
+                price_okx = get_price_okx(symbol)
+                price_kraken = get_price_kraken(symbol)
+
+                best_buy = min([p for p in [price_bybit, price_okx, price_kraken] if p > 0])
+                best_sell = max([p for p in [price_bybit, price_okx, price_kraken] if p > 0])
+
+                if best_buy == 0:
+                    continue
+
+                spread = ((best_sell - best_buy) / best_buy) * 100
+
+                if spread >= MIN_SPREAD_PERCENT:
+                    simulate_trade(symbol, buy_price=best_buy, sell_price=best_sell)
+
+            except Exception as e:
+                send_telegram(f"⚠️ Erreur sur {symbol}: {e}")
+                log(f"Erreur {symbol}: {e}")
+                continue
+
+        time.sleep(TRADE_INTERVAL)
+
+# Lancer la boucle principale
+loop_trading()
