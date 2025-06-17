@@ -1,66 +1,43 @@
 import os
-import json
 import time
+import json
 import hmac
 import hashlib
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
-from threading import Thread, Event
+from threading import Thread
 
 load_dotenv()
 
-# ========== CLÉS ==========
+# ========== CONFIGURATION ==========
+BYBIT_API = os.getenv("BYBIT_API")
+BYBIT_SECRET = os.getenv("BYBIT_SECRET")
+OKX_API = os.getenv("OKX_API")
+OKX_SECRET = os.getenv("OKX_SECRET")
+OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE")
+KRAKEN_API = os.getenv("KRAKEN_API")
+KRAKEN_SECRET = os.getenv("KRAKEN_SECRET")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
-BYBIT_SECRET = os.getenv("BYBIT_API_SECRET")
 
-# ========== PARAMÈTRES ==========
-SYMBOLS = ["BTCUSDT", "ETHUSDT"]
-ORDER_SIZE = 10  # USD
+ORDER_SIZE = 10
 TAKE_PROFIT = 0.02
 STOP_LOSS = -0.01
-SPREAD_MINIMUM = 0.005  # 0.5 %
-POSITIONS_FILE = "positions_bybit.json"
-LOG_FILE = "log_bybit.txt"
-CAPITAL_INITIAL = 100
+SPREAD_MIN = 0.5  # %
 
-running = True
-total_profit = 0
-trade_count = 0
+POSITIONS_FILE = "positions.json"
+STATS_FILE = "stats.json"
+RUNNING = True
 
 # ========== OUTILS ==========
 def log(msg):
-    with open(LOG_FILE, "a") as f:
-        f.write(f"{datetime.utcnow()} | {msg}\n")
+    with open("log.txt", "a") as f:
+        f.write(f"{datetime.now(timezone.utc)} | {msg}\n")
 
-def send_telegram(message):
+def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message})
-
-def sign_bybit(params):
-    query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
-    return hmac.new(BYBIT_SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
-
-def get_price(symbol):
-    url = f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={symbol}"
-    r = requests.get(url).json()
-    return float(r['result']['list'][0]['lastPrice'])
-
-def place_order(symbol, side, qty):
-    url = "https://api.bybit.com/v5/order/create"
-    params = {
-        "apiKey": BYBIT_API_KEY,
-        "symbol": symbol,
-        "category": "spot",
-        "side": side,
-        "orderType": "Market",
-        "qty": qty,
-        "timestamp": int(time.time() * 1000)
-    }
-    params["sign"] = sign_bybit(params)
-    return requests.post(url, json=params).json()
+    requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
 
 def load_positions():
     if os.path.exists(POSITIONS_FILE):
@@ -72,105 +49,147 @@ def save_positions(data):
     with open(POSITIONS_FILE, "w") as f:
         json.dump(data, f)
 
-# ========== FONCTIONS ==========
-def trading_cycle():
-    global trade_count, total_profit
+def load_stats():
+    if os.path.exists(STATS_FILE):
+        with open(STATS_FILE, "r") as f:
+            return json.load(f)
+    return {"trades": 0, "profit": 0.0}
+
+def save_stats(data):
+    with open(STATS_FILE, "w") as f:
+        json.dump(data, f)
+
+# ========== PRIX ==========
+def get_bybit_price(symbol):
+    r = requests.get(f"https://api.bybit.com/v5/market/tickers?category=spot").json()
+    for coin in r['result']['list']:
+        if coin['symbol'] == symbol:
+            return float(coin['lastPrice'])
+    return None
+
+def get_kraken_price(symbol):
+    symbol_map = {"BTCUSDT": "XBTUSDT", "ETHUSDT": "ETHUSDT"}
+    pair = symbol_map.get(symbol, symbol)
+    r = requests.get(f"https://api.kraken.com/0/public/Ticker?pair={pair}").json()
+    result = r.get("result", {})
+    for data in result.values():
+        return float(data["c"][0])
+    return None
+
+def get_okx_price(symbol):
+    r = requests.get(f"https://www.okx.com/api/v5/market/ticker?instId={symbol}").json()
+    return float(r["data"][0]["last"]) if r["data"] else None
+
+# ========== ORDRES SIMULÉS ==========
+def fake_order(exchange, symbol, side, qty, price):
+    msg = f"{side} {symbol} sur {exchange} à {price}"
+    log(msg)
+    send_telegram(msg)
+    return True
+
+# ========== STRATÉGIE ==========
+def trade_cycle():
+    global RUNNING
     positions = load_positions()
+    stats = load_stats()
+
+    SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 
     for symbol in SYMBOLS:
-        try:
-            price = get_price(symbol)
-            qty = round(ORDER_SIZE / price, 5)
-            key = symbol
+        if not RUNNING:
+            break
 
-            if key in positions:
-                entry = positions[key]
-                change = (price - entry["buy_price"]) / entry["buy_price"]
-                if change >= TAKE_PROFIT:
-                    place_order(symbol, "Sell", entry["qty"])
-                    profit = change * ORDER_SIZE
-                    total_profit += profit
-                    trade_count += 1
-                    send_telegram(f"✅ Vente {symbol} à {price} (+{change*100:.2f}%)")
-                    log(f"TP {symbol} : +{change*100:.2f}%")
-                    del positions[key]
-                elif change <= STOP_LOSS:
-                    place_order(symbol, "Sell", entry["qty"])
-                    profit = change * ORDER_SIZE
-                    total_profit += profit
-                    trade_count += 1
-                    send_telegram(f"❌ Stop-Loss {symbol} à {price} ({change*100:.2f}%)")
-                    log(f"SL {symbol} : {change*100:.2f}%")
-                    del positions[key]
+        try:
+            price_bybit = get_bybit_price(symbol)
+            price_kraken = get_kraken_price(symbol)
+            price_okx = get_okx_price(symbol)
+
+            prices = {
+                "bybit": price_bybit,
+                "kraken": price_kraken,
+                "okx": price_okx,
+            }
+
+            # Stratégie d'achat sur la plateforme la moins chère
+            best_buy = min(prices.items(), key=lambda x: x[1] if x[1] else float('inf'))
+            best_sell = max(prices.items(), key=lambda x: x[1] if x[1] else float('-inf'))
+
+            spread = ((best_sell[1] - best_buy[1]) / best_buy[1]) * 100
+            if spread < SPREAD_MIN:
+                continue  # Pas de spread suffisant
+
+            key = f"{symbol}"
+            if key not in positions:
+                qty = round(ORDER_SIZE / best_buy[1], 5)
+                fake_order(best_buy[0], symbol, "BUY", qty, best_buy[1])
+                positions[key] = {
+                    "buy_price": best_buy[1],
+                    "qty": qty,
+                    "buy_exchange": best_buy[0],
+                    "sell_exchange": best_sell[0],
+                }
             else:
-                spread = (price - price * 0.998) / price
-                if spread >= SPREAD_MINIMUM:
-                    place_order(symbol, "Buy", qty)
-                    positions[key] = {"buy_price": price, "qty": qty}
-                    send_telegram(f"🟢 Achat {symbol} à {price}")
-                    log(f"Achat {symbol} : {price}")
+                change = (best_sell[1] - positions[key]['buy_price']) / positions[key]['buy_price']
+                if change >= TAKE_PROFIT or change <= STOP_LOSS:
+                    fake_order(positions[key]['sell_exchange'], symbol, "SELL", positions[key]["qty"], best_sell[1])
+                    profit = (best_sell[1] - positions[key]['buy_price']) * positions[key]['qty']
+                    stats["trades"] += 1
+                    stats["profit"] += profit
+                    del positions[key]
 
         except Exception as e:
-            send_telegram(f"[{symbol}] Erreur : {str(e)}")
-            log(f"Erreur {symbol} : {str(e)}")
+            log(f"{symbol} erreur: {str(e)}")
+            send_telegram(f"⚠️ Erreur sur {symbol}: {str(e)}")
 
     save_positions(positions)
+    save_stats(stats)
 
-def send_daily_report():
-    global total_profit, trade_count
-    roi = (total_profit / CAPITAL_INITIAL) * 100
-    msg = (
-        f"📊 Rapport quotidien\n"
-        f"💰 Profit total : {total_profit:.2f} $\n"
-        f"📈 Trades : {trade_count}\n"
-        f"📊 ROI : {roi:.2f} %"
-    )
-    send_telegram(msg)
-    log(msg)
-    total_profit = 0
-    trade_count = 0
+# ========== TÂCHES ==========
 
-def wait_until_midnight():
+def loop_trading():
+    while True:
+        if RUNNING:
+            trade_cycle()
+        time.sleep(300)  # 5 min
+
+def daily_report():
     while True:
         now = datetime.now()
-        midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0)
-        time.sleep((midnight - now).total_seconds())
-        send_daily_report()
+        next_run = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        time.sleep((next_run - now).seconds)
+        stats = load_stats()
+        msg = f"📊 Rapport quotidien :\nTrades: {stats['trades']}\nProfit net: {stats['profit']:.2f} USD"
+        send_telegram(msg)
+        save_stats({"trades": 0, "profit": 0.0})
 
-def handle_telegram_commands():
-    global running
-    last_update_id = None
+# ========== COMMANDES TELEGRAM ==========
+def telegram_commands():
+    global RUNNING
+    offset = None
     while True:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-        r = requests.get(url).json()
-        updates = r.get("result", [])
-
-        for update in updates:
-            if last_update_id is None or update["update_id"] > last_update_id:
-                last_update_id = update["update_id"]
-                msg = update.get("message", {}).get("text", "")
-                chat_id = update.get("message", {}).get("chat", {}).get("id")
-
-                if msg == "/stop":
-                    running = False
-                    send_telegram("⏹ Bot arrêté.")
-                elif msg == "/start":
-                    running = True
-                    send_telegram("▶️ Bot relancé.")
-                elif msg == "/balance":
-                    send_telegram(f"💼 Capital initial : {CAPITAL_INITIAL}$")
-                elif msg == "/status":
-                    send_telegram(f"⏱ Statut du bot : {'✅ En marche' if running else '⛔️ Arrêté'}")
-
+        if offset:
+            url += f"?offset={offset}"
+        res = requests.get(url).json()
+        for update in res.get("result", []):
+            offset = update["update_id"] + 1
+            cmd = update["message"]["text"]
+            if cmd == "/start":
+                RUNNING = True
+                send_telegram("▶️ Trading relancé.")
+            elif cmd == "/stop":
+                RUNNING = False
+                send_telegram("⏸️ Trading en pause.")
+            elif cmd == "/status":
+                send_telegram("✅ Le bot fonctionne." if RUNNING else "⛔ Le bot est en pause.")
+            elif cmd == "/balance":
+                stats = load_stats()
+                send_telegram(f"💼 Profit: {stats['profit']:.2f} USD | Trades: {stats['trades']}")
         time.sleep(5)
 
-# ========== DÉMARRAGE ==========
+# ========== MAIN ==========
 if __name__ == "__main__":
-    send_telegram("🤖 Bot Trading Bybit lancé.")
-    Thread(target=wait_until_midnight, daemon=True).start()
-    Thread(target=handle_telegram_commands, daemon=True).start()
-
-    while True:
-        if running:
-            trading_cycle()
-        time.sleep(300)
+    send_telegram("🤖 Bot multi-exchange lancé.")
+    Thread(target=loop_trading).start()
+    Thread(target=daily_report).start()
+    Thread(target=telegram_commands).start()
