@@ -53,16 +53,18 @@ def send_telegram(message):
         pass
 # ========== Partie 2 : Connexion aux exchanges et récupération des prix ==========
 
-def get_bybit_price(symbol):
+def get_price_bybit(symbol):
     try:
-     def get_price_bybit(symbol):
-    try:
-        url = f"https://api.bybit.com/v5/market/tickers?category=spot"
+        url = "https://api.bybit.com/v5/market/tickers?category=spot"
         res = requests.get(url)
+        if res.status_code != 200 or not res.text.strip():
+            log(f"❌ EMPTY or BAD RESPONSE from BYBIT for {symbol} → Status: {res.status_code}")
+            return 0
         data = res.json()
         for ticker in data['result']['list']:
             if ticker['symbol'] == symbol:
                 return float(ticker['lastPrice'])
+        log(f"⚠️ Symbol {symbol} not found in BYBIT response")
         return 0
     except Exception as e:
         log(f"BYBIT error for {symbol}: {e}")
@@ -72,8 +74,8 @@ def get_price_okx(symbol):
     try:
         url = f"https://www.okx.com/api/v5/market/ticker?instId={symbol}"
         res = requests.get(url)
-        if res.status_code != 200:
-            log(f"OKX HTTP ERROR {res.status_code} for {symbol}")
+        if res.status_code != 200 or not res.text.strip():
+            log(f"❌ EMPTY or BAD RESPONSE from OKX for {symbol} → Status: {res.status_code}")
             return 0
         data = res.json()
         return float(data['data'][0]['last']) if 'data' in data and data['data'] else 0
@@ -83,19 +85,20 @@ def get_price_okx(symbol):
 
 def get_price_kraken(symbol):
     try:
-        # Kraken utilise XBT à la place de BTC
         if symbol == "BTCUSDT":
             symbol = "XBTUSDT"
         pair_code = symbol.replace("USDT", "ZUSD")
         url = f"https://api.kraken.com/0/public/Ticker?pair={pair_code}"
         res = requests.get(url)
+        if res.status_code != 200 or not res.text.strip():
+            log(f"❌ EMPTY or BAD RESPONSE from KRAKEN for {symbol} → Status: {res.status_code}")
+            return 0
         data = res.json()
         pair = list(data['result'].keys())[0]
         return float(data['result'][pair]['c'][0])
     except Exception as e:
         log(f"KRAKEN error for {symbol}: {e}")
         return 0
-
 
 # -------- Calcul Spread --------
 def check_spread_and_decide(symbol):
@@ -118,49 +121,51 @@ def check_spread_and_decide(symbol):
         # Ajoute ici : place_trade(min_exchange, max_exchange, symbol)
     else:
         log(f"Spread insuffisant ({spread:.2f}%) pour {symbol}")
+        
 # ========== Partie 3 : Trading simulé et reporting ==========
 
-capital = STARTING_CAPITAL
-trades = []
-is_running = True
+def get_signal(symbol):
+    # Récupération des prix sur chaque exchange
+    price_bybit = get_price_bybit(symbol)
+    price_okx = get_price_okx(symbol.replace("USDT", "-USDT"))
+    price_kraken = get_price_kraken(symbol)
 
-def simulate_trade(symbol, buy_price, sell_price, amount=10):
-    global capital
-    profit = (sell_price - buy_price) * amount / buy_price
-    capital += profit
-    trades.append({
-        "symbol": symbol,
-        "buy_price": buy_price,
-        "sell_price": sell_price,
-        "profit": profit,
-        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    })
-    msg = f"✅ TRADE | {symbol}\n💵 Buy: {buy_price:.2f} | Sell: {sell_price:.2f}\n📈 Profit: {profit:.4f} USDT"
-    send_telegram(msg)
-    log(msg)
+    # Ajout de logs pour vérifier les valeurs
+    log(f"[SIGNAL CHECK] {symbol} - Bybit: {price_bybit} | OKX: {price_okx} | Kraken: {price_kraken}")
 
-def generate_daily_report():
-    total_profit = sum(t['profit'] for t in trades)
-    total_trades = len(trades)
-    roi = (capital - STARTING_CAPITAL) / STARTING_CAPITAL * 100
+    # Vérification des données valides
+    if not all([price_bybit, price_okx, price_kraken]):
+        log(f"❌ Données incomplètes ou incorrectes pour {symbol}.")
+        return None
 
-    report = (
-        f"📊 Rapport du jour ({datetime.utcnow().strftime('%Y-%m-%d')}):\n"
-        f"💰 Capital: {capital:.2f} USDT\n"
-        f"📈 Profit net: {total_profit:.4f} USDT\n"
-        f"🔁 Nombre de trades: {total_trades}\n"
-        f"📊 ROI: {roi:.2f}%"
-    )
-    send_telegram(report)
-    log(report)
+    prices = [price_bybit, price_okx, price_kraken]
+    max_price = max(prices)
+    min_price = min(prices)
 
-# Rapport automatique chaque minuit
-def schedule_daily_report():
-    while True:
-        now = datetime.utcnow()
-        seconds_to_midnight = (datetime.combine(now.date(), datetime.min.time()) + timedelta(days=1) - now).seconds
-        time.sleep(seconds_to_midnight)
-        generate_daily_report()
+    # Seuil de déclenchement d'arbitrage : 0.5% d'écart
+    spread = (max_price - min_price) / min_price
+    if spread >= 0.005:
+        log(f"✅ Opportunité détectée sur {symbol} (Spread: {spread*100:.2f}%)")
+        return {"symbol": symbol, "spread": spread, "buy": min_price, "sell": max_price}
+    else:
+        log(f"🔍 Pas d'opportunité significative sur {symbol} (Spread: {spread*100:.2f}%)")
+        return None
+
+
+# 🔍 TESTS RAPIDES POUR DEBUG
+if __name__ == "__main__":
+    test_symbol = "BTCUSDT"
+    print("🧪 TEST DE RÉCUPÉRATION DES PRIX EN TEMPS RÉEL")
+    print(f"Bybit ({test_symbol}): {get_price_bybit(test_symbol)}")
+    print(f"OKX ({test_symbol.replace('USDT', '-USDT')}): {get_price_okx(test_symbol.replace('USDT', '-USDT'))}")
+    print(f"Kraken ({test_symbol}): {get_price_kraken(test_symbol)}")
+
+    print("\n🧪 TEST DE SIGNAL")
+    signal = get_signal(test_symbol)
+    if signal:
+        print(f"📊 SIGNAL: {signal}")
+    else:
+        print("⚠️ Aucun signal généré.")
 
 # ========== Partie 4 : Commandes Telegram ==========
 
