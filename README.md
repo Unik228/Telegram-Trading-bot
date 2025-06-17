@@ -1,4 +1,17 @@
 # 🤖 Telegram Crypto Trading Bot
+# 🤖 Trading Bot Multi-Plateforme
+
+Un bot de trading automatique connecté à **Bybit, Kraken et OKX**, avec :
+- Envoi d'alertes Telegram
+- Fichier `.env` pour sécuriser les clés
+- Optimisation du trading multi-paires
+- Support des stratégies spread, TP/SL
+
+## Installation
+
+```bash
+pip install -r requirements.txt
+python main.py
 
 Un bot automatisé de trading pour les plateformes **Binance** et **Bybit**, qui envoie des signaux sur Telegram et peut passer des ordres réels de manière sécurisée.
 
