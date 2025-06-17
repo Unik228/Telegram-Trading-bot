@@ -1,5 +1,5 @@
 .env
 __pycache__/
-*.log
-positions.json
+*.pyc
 log.txt
+positions.json
